@@ -13,11 +13,11 @@
 - [x] Implement parser arguments and request construction; preserve source lookup errors before submission.
 - [x] Document exact flags and attribute the PR #6 title fix.
 - [x] Run formatting, focused tests, full suite and clippy: 197 tests pass; fmt and clippy clean.
-- [ ] Build release binary.
+- [x] Build release binary: `cargo build --locked --release` completed successfully.
 - [x] Independent read-only review completed; its vocal-direction finding was reproduced by a failing test, fixed and reviewed again.
 - [x] Authenticated read-only Cover preview against an existing library source: source ID and nonempty lyrics retained, title/exclusions match, sliders are 0.2/0.7/0.7, submitted=false and no CAPTCHA token. No generation or credits consumed by the preview.
 - [x] Authenticated missing-source preview: all-zero UUID returns invalid_input / exit 3 before CAPTCHA or submission.
-- [ ] Push branch/PR to the user's fork with validation evidence.
+- [x] Push branch/PR to the user's fork with validation evidence: https://github.com/douglasgodoy/suno-cli/pull/1.
 
 **Review focus:** omitted flags must preserve source data; zero and 100 are valid while non-finite/out-of-range sliders are rejected; source ID remains bound to the Cover request; source-read failure must not turn into a new song; wire values must be normalized once, and no metadata should claim live musical validation.
 
