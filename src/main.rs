@@ -89,6 +89,37 @@ fn build_tags(tags: Option<&str>, vocal: Option<&VocalGender>) -> Option<String>
     }
 }
 
+/// Explicit Cover vocal direction replaces recognized conflicting style tags.
+/// Without a vocal override, preserve source tags, including an explicit empty value.
+fn build_cover_tags(tags: Option<&str>, vocal: Option<&VocalGender>) -> Option<String> {
+    let Some(vocal) = vocal else {
+        return tags.map(str::to_string);
+    };
+    let opposite = match vocal {
+        VocalGender::Male => "female",
+        VocalGender::Female => "male",
+    };
+    let filtered = tags
+        .unwrap_or_default()
+        .split(',')
+        .filter(|tag| {
+            let lower = tag.to_ascii_lowercase();
+            let words: Vec<_> = lower
+                .split(|c: char| !c.is_ascii_alphabetic())
+                .filter(|word| !word.is_empty())
+                .collect();
+            !words.windows(2).any(|pair| {
+                pair[0] == opposite && matches!(pair[1], "vocal" | "vocals" | "voice" | "singer")
+            })
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    build_tags(
+        (!filtered.is_empty()).then_some(filtered.as_str()),
+        Some(vocal),
+    )
+}
+
 /// Build a control_sliders block when any slider flag is set.
 /// Returns None when none is provided so we don't pollute the request.
 fn build_control_sliders(
@@ -611,11 +642,36 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
         Commands::Cover(args) => {
             let cfg = config::AppConfig::load()?;
             let model = resolve_model(args.model, &cfg)?;
+            let c = client().await?;
+            // Read the identified source before any CAPTCHA or submission.
+            // Never silently create a new song when the source is unavailable.
+            let sources = c.get_clips(std::slice::from_ref(&args.clip_id)).await?;
+            let source = sources
+                .iter()
+                .find(|clip| clip.id == args.clip_id)
+                .ok_or_else(|| CliError::InvalidInput("Cover source was not found".into()))?;
+            let tags = build_cover_tags(
+                args.tags.as_deref().or(source.metadata.tags.as_deref()),
+                args.vocal.as_ref(),
+            );
+            let mut req = api::cover::build_cover_request(
+                source,
+                model.to_api_key(),
+                args.title.as_deref(),
+                tags.as_deref(),
+                args.exclude.as_deref(),
+                build_control_sliders(args.weirdness, args.style_influence, args.audio_influence),
+            );
+            api::models::validate_offline(&req)?;
+            if args.dry_run {
+                preview_request(&req, fmt)?;
+                return Ok(());
+            }
+            cfg.validate()?;
             let mut guard = guard::DuplicateGuard::new(&config::data_dir(), "cover");
             guard.acquire(args.force)?;
-
-            let c = client().await?;
-            let (token, token_provider) = resolve_captcha(
+            c.validate_generation(&req).await?;
+            (req.token, req.token_provider) = resolve_captcha(
                 &c,
                 args.token,
                 args.token_provider,
@@ -625,21 +681,10 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
                 cli.quiet,
             )
             .await?;
-            let control_sliders = build_control_sliders(None, None, args.audio_influence);
-
             if !cli.quiet {
                 eprintln!("Creating cover ({})...", model.display_name());
             }
-            let clips = c
-                .cover(
-                    &args.clip_id,
-                    model.to_api_key(),
-                    args.tags.as_deref(),
-                    token,
-                    token_provider,
-                    control_sliders,
-                )
-                .await?;
+            let clips = c.generate(&req).await?;
             handle_generation(
                 &c,
                 clips,

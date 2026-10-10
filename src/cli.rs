@@ -619,6 +619,30 @@ pub struct CoverArgs {
     #[arg(long)]
     pub tags: Option<String>,
 
+    /// Cover title (default: source title, or "Cover" if the source is untitled)
+    #[arg(short, long)]
+    pub title: Option<String>,
+
+    /// Exclude styles (comma-separated)
+    #[arg(long)]
+    pub exclude: Option<String>,
+
+    /// Vocal direction; omit to preserve the source direction
+    #[arg(long)]
+    pub vocal: Option<VocalGender>,
+
+    /// Weirdness level (0-100)
+    #[arg(long, value_parser = percentage)]
+    pub weirdness: Option<f64>,
+
+    /// Style influence strength (0-100)
+    #[arg(long, value_parser = percentage)]
+    pub style_influence: Option<f64>,
+
+    /// Preview the request after reading source metadata; no submission or credits
+    #[arg(long)]
+    pub dry_run: bool,
+
     /// Model version for the cover (default: config `default_model`)
     #[arg(short, long)]
     pub model: Option<ModelVersion>,

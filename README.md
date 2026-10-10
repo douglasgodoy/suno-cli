@@ -331,11 +331,34 @@ Create covers with different styles or remaster clips with newer models:
 # Cover with different style tags
 suno cover <clip_id> --tags "jazz, smooth piano" --model v6 --wait
 
+# Preview a Cover with explicit remix controls; reads the source using your
+# stored authentication, but never solves a CAPTCHA or submits a generation.
+suno cover <clip_id> --title "My Song (Dub Remix)" \
+  --tags "roots dub, rounded bass, organ bubble, tape delay, clear vocals" \
+  --exclude "reggaeton dembow, aggressive EDM drops" \
+  --weirdness 20 --style-influence 70 --audio-influence 70 \
+  --model v6 --dry-run
+# Remove --dry-run and add --wait to generate. Add --vocal male|female only
+# when you explicitly want to steer the voice away from the source direction.
+
 # Remaster an old clip with the latest model
 suno remaster <clip_id> --model v6 --wait --download ./remastered/
 ```
 
 Both route through Suno's unified web generation endpoint (`/api/generate/v2-web/`).
+
+Cover fetches the identified source before submission and preserves its lyrics
+and instrumental status. Omitted `--tags` inherits the source's style tags;
+`--title` defaults to the source title, then `Cover` if the source is untitled.
+Exclusions are explicit and default to an empty list. All three influence flags
+accept finite values from 0 to 100 and are normalized to the API's 0–1 range;
+omitted sliders are not sent. `--dry-run` requires authentication to read the
+source, unlike the offline preview offered by `generate`.
+
+The title-resolution behavior adapts [upstream PR #6](https://github.com/paperfoot/suno-cli/pull/6)
+to the current request schema. Cover's API mapping and musical fidelity still
+need live verification; a request preview verifies the payload, not the audio.
+Duration, Variety and Personalize are not exposed or verified by these flags.
 
 ### Clip Info
 
