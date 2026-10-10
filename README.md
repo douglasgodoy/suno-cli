@@ -299,13 +299,18 @@ Auth methods (in order of convenience):
 
 ### Browser and captcha policy
 
-Before generate/describe/extend/cover/remaster, the CLI asks `/api/c/check` whether the account is captcha-gated. With normal defaults, it may use browser automation only when required. Global `--headless` permits invisible Chrome for the challenge and never falls back to a visible window. Global `--no-browser` is HTTP-only: it never reads or launches a browser and returns `captcha_required` if a challenge needs browser work. `--token` supplies a solved token; `--token-provider 1|2` (alias `--captcha-provider`) selects hCaptcha or Turnstile; command-level `--no-captcha` disables the solver for deliberate API tests or use with `--token`.
+Before generate/describe/extend/cover/remaster, the CLI asks `/api/c/check` whether the account is captcha-gated. When required, the default opens one visible Chrome window for you to complete the selected provider's verification. It does not cycle through providers or browser modes after a failure. Global `--headless` permits invisible Chrome and never falls back to a visible window. Global `--no-browser` is HTTP-only and returns `captcha_required` when browser work is needed. `--token-provider 1|2` (alias `--captcha-provider`) selects hCaptcha or Turnstile; `--no-captcha` disables verification for deliberate API tests or use with a supplied `--token`.
+
+Generate and Cover accept `--rounds 1..10` (default 1). Rounds are separate submissions and consume the usual credits; the number of returned songs is determined by Suno. A batch reuses one process-owned browser and authenticated page, but obtains a fresh single-use token whenever required. Suno may still request a challenge for every submission. The temporary profile is closed when the command exits; separate CLI commands start separate sessions. A supplied `--token` requires `--rounds 1`.
+
+Keep the same `--request-id`, arguments, and round count when resuming a batch. Saved submission receipts prevent repeating completed rounds. On uncertain failures, inspect `suno jobs` and your library before retrying.
 
 Examples:
 
 ```bash
 suno --headless generate --title "Night Drive" --tags "indie rock" --lyrics-file song.txt
 suno --no-browser generate --title "Night Drive" --tags "indie rock" --lyrics-file song.txt
+suno generate --title "Night Drive" --tags "indie rock" --lyrics-file song.txt --rounds 2 --request-id 11111111-1111-4111-8111-111111111111 --wait
 ```
 
 ### Voice Personas
@@ -331,11 +336,34 @@ Create covers with different styles or remaster clips with newer models:
 # Cover with different style tags
 suno cover <clip_id> --tags "jazz, smooth piano" --model v6 --wait
 
+# Preview a Cover with explicit remix controls; reads the source using your
+# stored authentication, but never solves a CAPTCHA or submits a generation.
+suno cover <clip_id> --title "My Song (Dub Remix)" \
+  --tags "roots dub, rounded bass, organ bubble, tape delay, clear vocals" \
+  --exclude "reggaeton dembow, aggressive EDM drops" \
+  --weirdness 20 --style-influence 70 --audio-influence 70 \
+  --model v6 --dry-run
+# Remove --dry-run and add --wait to generate. Add --vocal male|female only
+# when you explicitly want to steer the voice away from the source direction.
+
 # Remaster an old clip with the latest model
 suno remaster <clip_id> --model v6 --wait --download ./remastered/
 ```
 
 Both route through Suno's unified web generation endpoint (`/api/generate/v2-web/`).
+
+Cover fetches the identified source before submission and preserves its lyrics
+and instrumental status. Omitted `--tags` inherits the source's style tags;
+`--title` defaults to the source title, then `Cover` if the source is untitled.
+Exclusions are explicit and default to an empty list. All three influence flags
+accept finite values from 0 to 100 and are normalized to the API's 0–1 range;
+omitted sliders are not sent. `--dry-run` requires authentication to read the
+source, unlike the offline preview offered by `generate`.
+
+The title-resolution behavior adapts [upstream PR #6](https://github.com/paperfoot/suno-cli/pull/6)
+to the current request schema. Cover's API mapping and musical fidelity still
+need live verification; a request preview verifies the payload, not the audio.
+Duration, Variety and Personalize are not exposed or verified by these flags.
 
 ### Clip Info
 

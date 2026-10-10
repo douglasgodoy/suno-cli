@@ -21,10 +21,13 @@ use tokio_tungstenite::tungstenite::Message;
 use crate::auth::AuthState;
 use crate::errors::CliError;
 
+static SESSION_INITIALIZED: AtomicBool = AtomicBool::new(false);
+
 static SOLVER_QUIET: AtomicBool = AtomicBool::new(false);
 macro_rules! solver_log {
     ($($arg:tt)*) => { if !SOLVER_QUIET.load(Ordering::Relaxed) { eprintln!($($arg)*); } };
 }
+mod interactive;
 
 /// Suno's hCaptcha sitekey, captured from the live web app's
 /// `hcaptcha.render(...)` arguments on 2026-04-08.
@@ -45,9 +48,7 @@ fn active_port() -> u16 {
     ACTIVE_PORT.load(Ordering::Relaxed)
 }
 
-/// How the solver Chrome is displayed. Headless is tried first (fully
-/// invisible); Headed is the offscreen-window fallback for when hCaptcha
-/// flags headless.
+/// Normal operation is human-interactive; headless must be explicitly requested.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ChromeMode {
     Headless,
@@ -58,7 +59,7 @@ impl ChromeMode {
     fn label(self) -> &'static str {
         match self {
             Self::Headless => "headless",
-            Self::Headed => "offscreen",
+            Self::Headed => "interactive",
         }
     }
 }
@@ -85,9 +86,8 @@ fn solve_lock() -> &'static Mutex<()> {
 /// Solve a fresh hCaptcha challenge and return the token to attach to a
 /// `/api/generate/v2-web/` request body.
 ///
-/// Headless first; if hCaptcha rejects it (it fingerprints headless Chrome
-/// intermittently), fall back once to a headed instance parked offscreen.
-/// `SUNO_CAPTCHA_HEADLESS=1` / `SUNO_CAPTCHA_HEADED=1` pin a mode.
+/// Use one interactive window by default; explicit headless mode never
+/// falls back to another browser mode or provider.
 pub async fn solve(
     auth: &AuthState,
     headless_only: bool,
@@ -97,35 +97,16 @@ pub async fn solve(
     let _serialized = solve_lock().lock().await;
     SOLVER_QUIET.store(quiet, Ordering::Relaxed);
     let pin_headless = headless_only || env_flag("SUNO_CAPTCHA_HEADLESS");
-    let pin_headed = !pin_headless && env_flag("SUNO_CAPTCHA_HEADED");
-    let first = if pin_headed {
-        ChromeMode::Headed
-    } else {
+    let mode = if pin_headless {
         ChromeMode::Headless
+    } else {
+        ChromeMode::Headed
     };
-    // Suno's current client also latches an hCaptcha fallback after a
-    // Turnstile failure. Return the provider that actually produced the token.
-    let providers: &[u8] = if provider == 2 { &[2, 1] } else { &[1] };
-    let mut last = None;
-    for &p in providers {
-        match solve_in(first, auth, p).await {
-            Ok(token) => return Ok((token, p)),
-            Err(e) => {
-                solver_log!("Captcha provider {p} failed: {e}");
-                last = Some(e);
-                shutdown().await;
-            }
-        }
-    }
-    if first == ChromeMode::Headless && !pin_headless {
-        solver_log!("Retrying captcha with the offscreen browser fallback...");
-        match solve_in(ChromeMode::Headed, auth, 1).await {
-            Ok(token) => return Ok((token, 1)),
-            Err(e) => last = Some(e),
-        }
-    }
-    Err(CliError::Recovery { source:Box::new(last.unwrap()), suggestion:
-        "Retry without --headless to allow the offscreen fallback, or supply a solved --token with --token-provider 1 (hCaptcha) or 2 (Turnstile). No generation was submitted.".into() })
+    // One provider, one window, one attempt. Never silently cycle providers or modes.
+    solve_in(mode, auth, provider).await.map(|token| (token,provider)).map_err(|e| {
+        CliError::Recovery { source:Box::new(e), suggestion:
+            "Complete verification in the visible Chrome window. For headless environments supply a fresh --token with the provider requested by Suno. No generation was submitted by this attempt.".into() }
+    })
 }
 
 fn env_flag(name: &str) -> bool {
@@ -144,13 +125,20 @@ async fn solve_in(mode: ChromeMode, auth: &AuthState, provider: u8) -> Result<St
             target.web_socket_debugger_url
         )));
     }
-    render_and_execute(&target.web_socket_debugger_url, auth, provider).await
+    render_and_execute(
+        &target.web_socket_debugger_url,
+        auth,
+        provider,
+        mode == ChromeMode::Headed,
+    )
+    .await
 }
 
 /// Kill the Chrome this process spawned, if any. Called on every CLI exit
-/// path (and before a mode-fallback respawn) — the solver must never outlive
+/// path — the solver must never outlive
 /// the invocation. Instances we didn't spawn are never touched.
 pub async fn shutdown() {
+    SESSION_INITIALIZED.store(false, Ordering::Relaxed);
     let mut slot = chrome_slot().lock().await;
     if let Some((mut child, _, _profile)) = slot.take() {
         let _ = child.start_kill();
@@ -206,6 +194,7 @@ async fn ensure_chrome_running(mode: ChromeMode) -> Result<(), CliError> {
         let mut slot = chrome_slot().lock().await;
         if let Some((_, running_mode, _)) = slot.as_ref() {
             if *running_mode == mode && cdp_version().await.is_ok() {
+                solver_log!("CAPTCHA: reusing the batch's existing Chrome session");
                 return Ok(());
             }
             // Wrong mode or dead — replace it.
@@ -225,6 +214,7 @@ async fn ensure_chrome_running(mode: ChromeMode) -> Result<(), CliError> {
         Err(_) => free_loopback_port()?,
     };
     ACTIVE_PORT.store(port, Ordering::Relaxed);
+    SESSION_INITIALIZED.store(false, Ordering::Relaxed);
 
     let chrome_path = locate_chrome()?;
     // Never share a live profile across separate CLI processes. Chrome's
@@ -257,8 +247,7 @@ async fn ensure_chrome_running(mode: ChromeMode) -> Result<(), CliError> {
             cmd.arg("--headless=new");
         }
         ChromeMode::Headed => {
-            cmd.arg("--window-position=-32000,-32000")
-                .arg("--silent-launch");
+            cmd.arg("--window-position=100,100");
         }
     }
     let mut child = cmd
@@ -412,7 +401,9 @@ async fn find_or_create_suno_tab() -> Result<Target, CliError> {
     if let Some(t) = targets.into_iter().find(|t| {
         t.target_type == "page"
             && !t.web_socket_debugger_url.is_empty()
-            && !t.url.starts_with("chrome://")
+            && (t.url == "about:blank"
+                || reqwest::Url::parse(&t.url)
+                    .is_ok_and(|u| u.origin().ascii_serialization() == "https://suno.com"))
     }) {
         return Ok(t);
     }
@@ -513,6 +504,7 @@ async fn render_and_execute(
     ws_url: &str,
     auth: &AuthState,
     provider: u8,
+    manual: bool,
 ) -> Result<String, CliError> {
     let (mut ws, _) = tokio_tungstenite::connect_async(ws_url)
         .await
@@ -540,43 +532,85 @@ async fn render_and_execute(
     )
     .await?;
 
-    // Keep only the Suno-origin cookie set in our isolated profile. Duplicate
-    // Clerk/analytics cookies can cause HTTP 431 before the captcha SDK loads.
-    clear_suno_cookies(&mut ws, &mut next).await?;
+    if !SESSION_INITIALIZED.load(Ordering::Relaxed) {
+        solver_log!("CAPTCHA stage: initializing authenticated batch page");
+        // Keep only the Suno-origin cookie set in our isolated profile. Duplicate
+        // Clerk/analytics cookies can cause HTTP 431 before the captcha SDK loads.
+        clear_suno_cookies(&mut ws, &mut next).await?;
 
-    // Inject only the narrow Suno/Clerk cookie subset required to let the web
-    // app initialize. Replaying the whole browser Cookie header is brittle and
-    // can exceed Suno/Clerk request-header limits.
-    let cookies = extract_cookies(auth)?;
-    if !cookies.is_empty() {
+        // Inject only the narrow Suno/Clerk cookie subset required to let the web
+        // app initialize. Replaying the whole browser Cookie header is brittle and
+        // can exceed Suno/Clerk request-header limits.
+        let cookies = extract_cookies(auth)?;
+        if !cookies.is_empty() {
+            cdp_call(
+                &mut ws,
+                next(),
+                "Network.setCookies",
+                serde_json::json!({ "cookies": cookies }),
+            )
+            .await?;
+        }
+    }
+    // A human may navigate or close a tab between rounds. Verify the actual
+    // selected document before reusing the process-wide cookie initialization.
+    let current = cdp_call(&mut ws, next(), "Runtime.evaluate", serde_json::json!({
+        "expression":"location.origin === 'https://suno.com' && location.pathname.startsWith('/create') && document.readyState !== 'loading' && !!document.body",
+        "returnByValue":true
+    })).await?;
+    if current["result"]["value"].as_bool() != Some(true) {
         cdp_call(
             &mut ws,
             next(),
-            "Network.setCookies",
-            serde_json::json!({ "cookies": cookies }),
+            "Page.navigate",
+            serde_json::json!({ "url": "https://suno.com/create" }),
         )
         .await?;
-    }
 
-    cdp_call(
-        &mut ws,
-        next(),
-        "Page.navigate",
-        serde_json::json!({ "url": "https://suno.com/create" }),
-    )
-    .await?;
-
-    if provider == 2 {
-        cdp_call(&mut ws, next(), "Runtime.evaluate", serde_json::json!({
-            "expression": "if (!window.turnstile && !document.querySelector('script[src*=\"challenges.cloudflare.com/turnstile\"]')) { const s = document.createElement('script'); s.src='https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit'; document.head.appendChild(s); }",
-            "returnByValue": true,
-        })).await?;
+        // Page.navigate only starts navigation. Loading the SDK before the new
+        // document commits can inject into the old page and lose the script.
+        let mut document_ready = false;
+        for _ in 0..60 {
+            sleep(Duration::from_secs(1)).await;
+            let probe = cdp_call(&mut ws,next(),"Runtime.evaluate",serde_json::json!({
+            "expression":"location.origin === 'https://suno.com' && location.pathname.startsWith('/create') && document.readyState !== 'loading' && !!document.body",
+            "returnByValue":true
+        })).await;
+            if let Ok(probe) = probe
+                && probe["result"]["value"].as_bool() == Some(true)
+            {
+                document_ready = true;
+                break;
+            }
+        }
+        if !document_ready {
+            return Err(captcha_stage_error(provider,"document_load",CliError::Config(
+            "Suno create page did not finish loading; check the visible window for login or a network error".into())));
+        }
     }
-    let ready_expression = if provider == 2 {
-        "typeof turnstile !== 'undefined' && !!turnstile.render"
+    SESSION_INITIALIZED.store(true, Ordering::Relaxed);
+    solver_log!("CAPTCHA stage: loading provider {provider} SDK");
+    let (api, sdk_url) = if provider == 2 {
+        (
+            "turnstile",
+            "https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit",
+        )
     } else {
-        "typeof hcaptcha !== 'undefined' && !!hcaptcha.render"
+        (
+            "hcaptcha",
+            "https://js.hcaptcha.com/1/api.js?render=explicit",
+        )
     };
+    let ready_expression = format!(
+        r#"(() => {{
+        if (window.{api} && window.{api}.render) return true;
+        if (!document.getElementById('suno-cli-sdk-{provider}')) {{
+            const s=document.createElement('script'); s.id='suno-cli-sdk-{provider}';
+            s.src='{sdk_url}'; s.async=true; document.head.appendChild(s);
+        }}
+        return false;
+    }})()"#
+    );
     // Wait for the provider SDK (up to 30s).
     let mut ready = false;
     for _ in 0..30 {
@@ -586,7 +620,7 @@ async fn render_and_execute(
             next(),
             "Runtime.evaluate",
             serde_json::json!({
-                "expression": ready_expression,
+                "expression": &ready_expression,
                 "returnByValue": true,
             }),
         )
@@ -603,12 +637,23 @@ async fn render_and_execute(
     }
     if !ready {
         let page_state = page_state_excerpt(&mut ws, &mut next).await?;
-        return Err(CliError::Config(format!(
-            "captcha provider {provider} never finished loading on suno.com/create ({page_state})"
-        )));
+        return Err(captcha_stage_error(
+            provider,
+            "sdk_load",
+            CliError::Config(format!(
+                "captcha provider {provider} never finished loading on suno.com/create ({page_state})"
+            )),
+        ));
     }
     // Extra settle so the SDK is fully wired up.
     sleep(Duration::from_secs(2)).await;
+
+    if manual {
+        solver_log!("CAPTCHA stage: waiting for human verification (provider {provider})");
+        return interactive::wait(&mut ws, &mut next, provider)
+            .await
+            .map_err(|e| captcha_stage_error(provider, "human_verification", e));
+    }
 
     // Render an invisible widget and execute it
     let solve_js = if provider == 2 {
@@ -686,6 +731,15 @@ async fn render_and_execute(
         )));
     }
     Ok(token)
+}
+
+fn captcha_stage_error(provider: u8, stage: &str, error: CliError) -> CliError {
+    CliError::Diagnostic {
+        source: Box::new(error),
+        details: serde_json::json!({
+            "captcha_provider":provider,"captcha_stage":stage,"generation_submitted":false
+        }),
+    }
 }
 
 /// Delete every cookie scoped to a Suno origin, leaving other sites' cookies

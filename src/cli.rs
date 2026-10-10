@@ -389,6 +389,10 @@ pub enum SkillAction {
 
 #[derive(clap::Args)]
 pub struct GenerateArgs {
+    /// Sequential submissions sharing one browser session (each uses credits)
+    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(1..=10))]
+    pub rounds: u8,
+
     /// Song title
     #[arg(short, long)]
     pub title: Option<String>,
@@ -612,12 +616,44 @@ pub struct ConcatArgs {
 
 #[derive(clap::Args)]
 pub struct CoverArgs {
+    /// Sequential submissions sharing one browser session (each uses credits)
+    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(1..=10))]
+    pub rounds: u8,
+
+    /// Stable batch UUID for receipt-based retry recovery
+    #[arg(long)]
+    pub request_id: Option<uuid::Uuid>,
+
     /// Clip ID to create a cover of
     pub clip_id: String,
 
     /// Style tags for the cover
     #[arg(long)]
     pub tags: Option<String>,
+
+    /// Cover title (default: source title, or "Cover" if the source is untitled)
+    #[arg(short, long)]
+    pub title: Option<String>,
+
+    /// Exclude styles (comma-separated)
+    #[arg(long)]
+    pub exclude: Option<String>,
+
+    /// Vocal direction; omit to preserve the source direction
+    #[arg(long)]
+    pub vocal: Option<VocalGender>,
+
+    /// Weirdness level (0-100)
+    #[arg(long, value_parser = percentage)]
+    pub weirdness: Option<f64>,
+
+    /// Style influence strength (0-100)
+    #[arg(long, value_parser = percentage)]
+    pub style_influence: Option<f64>,
+
+    /// Preview the request after reading source metadata; no submission or credits
+    #[arg(long)]
+    pub dry_run: bool,
 
     /// Model version for the cover (default: config `default_model`)
     #[arg(short, long)]
