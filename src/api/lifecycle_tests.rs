@@ -438,3 +438,67 @@ async fn saved_request_never_silently_loses_ids_to_a_partial_feed() {
     }
     server.join().unwrap();
 }
+
+#[test]
+#[allow(clippy::result_large_err)]
+fn batch_resume_fetches_saved_rounds_without_captcha_or_paid_posts() {
+    figment::Jail::expect_with(|jail| {
+        jail.set_env("SUNO_DATA_DIR", jail.directory().display().to_string());
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let mut req = super::types::GenerateRequest::new("chirp-hawk", "custom");
+            let base_id = req.transaction_uuid.clone();
+            for round in 0..2 {
+                req.transaction_uuid = crate::commands::batch::round_id(&base_id, round);
+                let path = crate::commands::jobs::prepare(&req).unwrap();
+                crate::commands::jobs::save(
+                    &path,
+                    &req.transaction_uuid,
+                    &[format!("saved-{round}")],
+                    "submitted",
+                )
+                .unwrap();
+            }
+            req.transaction_uuid = base_id;
+            let a = Box::leak(feed_clip("saved-0", "complete").into_boxed_str());
+            let b = Box::leak(feed_clip("saved-1", "complete").into_boxed_str());
+            let (base, requests, server) = mock_server(vec![
+                Reply {
+                    status: 200,
+                    body: a,
+                },
+                Reply {
+                    status: 200,
+                    body: b,
+                },
+            ]);
+            let clips = crate::commands::batch::submit(
+                &SunoClient::for_test(base),
+                &mut req,
+                2,
+                crate::commands::batch::Options {
+                    token: None,
+                    provider: None,
+                    no_captcha: false,
+                    headless: false,
+                    no_browser: false,
+                    quiet: true,
+                    resume_wait: Some((5, 1)),
+                },
+            )
+            .await
+            .unwrap();
+            server.join().unwrap();
+            assert_eq!(clips.len(), 2);
+            assert_eq!(clips[0].id, "saved-0");
+            assert_eq!(clips[1].id, "saved-1");
+            assert!(
+                requests
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .all(|r| r.method == "GET" && r.target.starts_with("/api/feed/"))
+            );
+        });
+        Ok(())
+    });
+}

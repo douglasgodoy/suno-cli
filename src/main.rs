@@ -426,6 +426,7 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
         }
 
         Commands::Generate(args) => {
+            commands::batch::validate(args.rounds, args.token.as_deref())?;
             let cfg = config::AppConfig::load()?;
             let model = resolve_model(args.model, &cfg)?;
             let lyrics = match (&args.lyrics, &args.lyrics_file) {
@@ -455,59 +456,29 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
             }
             api::models::validate_offline(&req)?;
             if args.dry_run {
-                preview_request(&req, fmt)?;
+                commands::batch::preview(&req, args.rounds, fmt)?;
                 return Ok(());
             }
             cfg.validate()?;
             let mut guard = guard::DuplicateGuard::new(&config::data_dir(), "generate");
             guard.acquire(args.force)?;
             let c = client().await?;
-            if let Some(ids) = commands::jobs::existing(&req)? {
-                let clips = if args.wait || args.download.is_some() {
-                    c.poll_clips(&ids, cfg.poll_timeout_secs, cfg.poll_interval_secs)
-                        .await
-                        .map_err(|e| generation_recovery(e, &ids))?
-                } else {
-                    c.get_existing_clips(&ids)
-                        .await
-                        .map_err(|e| generation_recovery(e, &ids))?
-                };
-                handle_generation(
-                    &c,
-                    clips,
-                    args.wait,
-                    args.download.as_deref(),
-                    fmt,
-                    cli.quiet,
-                    &cfg,
-                )
-                .await?;
-                return Ok(());
-            }
-            c.validate_generation(&req).await?;
-            (req.token, req.token_provider) = resolve_captcha(
+            let clips = commands::batch::submit(
                 &c,
-                args.token,
-                args.token_provider,
-                args.no_captcha,
-                cli.headless,
-                cli.no_browser,
-                cli.quiet,
+                &mut req,
+                args.rounds,
+                commands::batch::Options {
+                    token: args.token,
+                    provider: args.token_provider,
+                    no_captcha: args.no_captcha,
+                    headless: cli.headless,
+                    no_browser: cli.no_browser,
+                    quiet: cli.quiet,
+                    resume_wait: (args.wait || args.download.is_some())
+                        .then_some((cfg.poll_timeout_secs, cfg.poll_interval_secs)),
+                },
             )
             .await?;
-
-            if !cli.quiet {
-                let persona_note = if args.persona.is_some() {
-                    " with voice persona"
-                } else {
-                    ""
-                };
-                eprintln!(
-                    "Submitting generation ({}{persona_note})...",
-                    model.display_name()
-                );
-            }
-            let clips = c.generate(&req).await?;
             handle_generation(
                 &c,
                 clips,
@@ -640,6 +611,7 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
         }
 
         Commands::Cover(args) => {
+            commands::batch::validate(args.rounds, args.token.as_deref())?;
             let cfg = config::AppConfig::load()?;
             let model = resolve_model(args.model, &cfg)?;
             let c = client().await?;
@@ -662,29 +634,33 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
                 args.exclude.as_deref(),
                 build_control_sliders(args.weirdness, args.style_influence, args.audio_influence),
             );
+            if let Some(id) = args.request_id {
+                req.transaction_uuid = id.to_string();
+            }
             api::models::validate_offline(&req)?;
             if args.dry_run {
-                preview_request(&req, fmt)?;
+                commands::batch::preview(&req, args.rounds, fmt)?;
                 return Ok(());
             }
             cfg.validate()?;
             let mut guard = guard::DuplicateGuard::new(&config::data_dir(), "cover");
             guard.acquire(args.force)?;
-            c.validate_generation(&req).await?;
-            (req.token, req.token_provider) = resolve_captcha(
+            let clips = commands::batch::submit(
                 &c,
-                args.token,
-                args.token_provider,
-                args.no_captcha,
-                cli.headless,
-                cli.no_browser,
-                cli.quiet,
+                &mut req,
+                args.rounds,
+                commands::batch::Options {
+                    token: args.token,
+                    provider: args.token_provider,
+                    no_captcha: args.no_captcha,
+                    headless: cli.headless,
+                    no_browser: cli.no_browser,
+                    quiet: cli.quiet,
+                    resume_wait: (args.wait || args.download.is_some())
+                        .then_some((cfg.poll_timeout_secs, cfg.poll_interval_secs)),
+                },
             )
             .await?;
-            if !cli.quiet {
-                eprintln!("Creating cover ({})...", model.display_name());
-            }
-            let clips = c.generate(&req).await?;
             handle_generation(
                 &c,
                 clips,

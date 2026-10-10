@@ -7,6 +7,7 @@ pub mod update;
 pub mod write;
 
 pub mod auth_input;
+pub mod batch;
 pub mod generation;
 pub mod jobs;
 

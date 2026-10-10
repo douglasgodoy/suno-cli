@@ -389,6 +389,10 @@ pub enum SkillAction {
 
 #[derive(clap::Args)]
 pub struct GenerateArgs {
+    /// Sequential submissions sharing one browser session (each uses credits)
+    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(1..=10))]
+    pub rounds: u8,
+
     /// Song title
     #[arg(short, long)]
     pub title: Option<String>,
@@ -612,6 +616,14 @@ pub struct ConcatArgs {
 
 #[derive(clap::Args)]
 pub struct CoverArgs {
+    /// Sequential submissions sharing one browser session (each uses credits)
+    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(1..=10))]
+    pub rounds: u8,
+
+    /// Stable batch UUID for receipt-based retry recovery
+    #[arg(long)]
+    pub request_id: Option<uuid::Uuid>,
+
     /// Clip ID to create a cover of
     pub clip_id: String,
 

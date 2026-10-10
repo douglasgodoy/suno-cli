@@ -299,13 +299,18 @@ Auth methods (in order of convenience):
 
 ### Browser and captcha policy
 
-Before generate/describe/extend/cover/remaster, the CLI asks `/api/c/check` whether the account is captcha-gated. With normal defaults, it may use browser automation only when required. Global `--headless` permits invisible Chrome for the challenge and never falls back to a visible window. Global `--no-browser` is HTTP-only: it never reads or launches a browser and returns `captcha_required` if a challenge needs browser work. `--token` supplies a solved token; `--token-provider 1|2` (alias `--captcha-provider`) selects hCaptcha or Turnstile; command-level `--no-captcha` disables the solver for deliberate API tests or use with `--token`.
+Before generate/describe/extend/cover/remaster, the CLI asks `/api/c/check` whether the account is captcha-gated. When required, the default opens one visible Chrome window for you to complete the selected provider's verification. It does not cycle through providers or browser modes after a failure. Global `--headless` permits invisible Chrome and never falls back to a visible window. Global `--no-browser` is HTTP-only and returns `captcha_required` when browser work is needed. `--token-provider 1|2` (alias `--captcha-provider`) selects hCaptcha or Turnstile; `--no-captcha` disables verification for deliberate API tests or use with a supplied `--token`.
+
+Generate and Cover accept `--rounds 1..10` (default 1). Rounds are separate submissions and consume the usual credits; the number of returned songs is determined by Suno. A batch reuses one process-owned browser and authenticated page, but obtains a fresh single-use token whenever required. Suno may still request a challenge for every submission. The temporary profile is closed when the command exits; separate CLI commands start separate sessions. A supplied `--token` requires `--rounds 1`.
+
+Keep the same `--request-id`, arguments, and round count when resuming a batch. Saved submission receipts prevent repeating completed rounds. On uncertain failures, inspect `suno jobs` and your library before retrying.
 
 Examples:
 
 ```bash
 suno --headless generate --title "Night Drive" --tags "indie rock" --lyrics-file song.txt
 suno --no-browser generate --title "Night Drive" --tags "indie rock" --lyrics-file song.txt
+suno generate --title "Night Drive" --tags "indie rock" --lyrics-file song.txt --rounds 2 --request-id 11111111-1111-4111-8111-111111111111 --wait
 ```
 
 ### Voice Personas
